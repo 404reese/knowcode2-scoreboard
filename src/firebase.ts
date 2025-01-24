@@ -2,7 +2,7 @@
 import { initializeApp } from "firebase/app";
 import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
-
+  
 // Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyBg2STmAblLlasomCu9dhXqsFCmwdQH9zg",

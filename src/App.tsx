@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { collection, getDocs } from "firebase/firestore";
+import { collection, getDocs, onSnapshot, query } from "firebase/firestore";
 import { db } from "./firebase"; // Ensure the path to your Firebase config is correct
-
 
 interface Team {
   id: number;
@@ -22,17 +21,16 @@ interface IGroupRating {
 }
 
 function App() {
-  const [teams, setTeams] = useState<Team[]>([
-    // { id: 1, name: 'Creeper Squad', criteria1: 85, criteria2: 92, criteria3: 80, criteria4: 75, criteria5: 88 },
-    // { id: 2, name: 'Diamond Miners', criteria1: 78, criteria2: 88, criteria3: 90, criteria4: 84, criteria5: 80 },
-    // { id: 3, name: 'Redstone Engineers', criteria1: 95, criteria2: 90, criteria3: 85, criteria4: 92, criteria5: 88 },
-    // { id: 4, name: 'Nether Knights', criteria1: 82, criteria2: 85, criteria3: 80, criteria4: 78, criteria5: 85 }
-  ]);
-
+  const [teams, setTeams] = useState<Team[]>([]);
   const [projects, setProjects] = useState<IFirebaseDocs[]>();
   const [criteria, setCriteria] = useState<IFirebaseDocs[]>();
-  // const [groupedRatings, setGroupedRatings] = useState<Record<string, any[]>>({});
-  const [groupedRatings, setGroupedRatings] = useState<IGroupRating[]>()
+  const [groupedRatings, setGroupedRatings] = useState<IGroupRating[]>();
+
+
+  const sortTeamsDescending = () => {
+    const sortedTeams = [...teams].sort((a, b) => averageScore(b) - averageScore(a));
+    setTeams(sortedTeams);
+  };
 
   function averageScore(team: Team): number {
     const scores = [
@@ -43,62 +41,84 @@ function App() {
       team.criteria5 || 0,
     ];
     const total = scores.reduce((sum, score) => sum + score, 0);
-    const count = scores.filter((score) => score > 0).length; // Count non-zero scores
+    const count = scores.filter((score) => score > 0).length;
     return count > 0 ? Number((total / count).toFixed(1)) : 0;
   }
 
-  async function fetchRatingsAndProjects() {
+  async function processRatingsAndProjects() {
     const ratingsCollection = collection(db, "ratings");
-    const ratingsSnapshot = await getDocs(ratingsCollection);
-    const ratingsList = ratingsSnapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+    const projectCollection = collection(db, "projects");
   
     // Fetch projects to map projectId -> teamName
-    const projectCollection = collection(db, "projects");
     const projectSnapshot = await getDocs(projectCollection);
     const projectList = projectSnapshot.docs.reduce((acc: Record<string, string>, doc) => {
       acc[doc.id] = doc.data().teamName; // Assuming teamName exists in the projects collection
       return acc;
     }, {});
   
-    // Group ratings by projectId
-    const grouped = ratingsList.reduce((acc: Record<string, any[]>, rating: any) => {
-      const { projectId } = rating;
-      if (!acc[projectId]) {
-        acc[projectId] = [];
-      }
-      acc[projectId].push(rating);
-      return acc;
-    }, {});
+    // Set up a query to listen to ratings collection
+    const q = query(ratingsCollection);
   
-    // Calculate criterion scores for each projectId and map teamName
-    const projectsData = Object.entries(grouped).map(([projectId, ratings]) => {
-      const scores: Record<string, number> = {};
-  
-      ratings.forEach((rating: any) => {
-        const { criterionId, score } = rating;
-        if (!scores[`criteria${criterionId}`]) {
-          scores[`criteria${criterionId}`] = 0;
+    // Set up real-time listener
+    const unsubscribe = onSnapshot(q, (ratingsSnapshot) => {
+      // Group ratings by projectId
+      const grouped = ratingsSnapshot.docs.reduce((acc: Record<string, any[]>, doc) => {
+        const rating = { id: doc.id, projectId: doc.data().projectId, ...doc.data() };
+        const { projectId } = rating;
+        if (!acc[projectId]) {
+          acc[projectId] = [];
         }
-        scores[`criteria${criterionId}`] += score;
+        acc[projectId].push(rating);
+        return acc;
+      }, {});
+  
+      // Calculate criterion scores for each projectId and map teamName
+      const projectsData = Object.entries(grouped).map(([projectId, ratings]) => {
+        const scores: Record<string, number> = {};
+  
+        ratings.forEach((rating: any) => {
+          const { criterionId, score, timestamp } = rating;
+          if (!scores[`criteria${criterionId}`]) {
+            scores[`criteria${criterionId}`] = 0;
+          }
+          scores[`criteria${criterionId}`] += score;
+        });
+  
+        return {
+          projectId,
+          timestamp: ratings.find(rating => rating.projectId === projectId)?.timestamp,
+          teamName: projectList[projectId] || `Project ${projectId}`, // Fallback if teamName is not found
+          ...scores,
+        };
       });
   
-      return {
-        projectId,
-        teamName: projectList[projectId] || `Project ${projectId}`, // Fallback if teamName is not found
-        ...scores,
-      };
+      // Sort projectsData by timestamp in descending order (current timestamp on top)
+      const sortedProjectsData = projectsData.sort((a, b) => {
+        const timestampA = a.timestamp?.seconds || 0; // Firebase timestamp is in seconds
+        const timestampB = b.timestamp?.seconds || 0;
+        return timestampB - timestampA; // Swapped for descending order
+      });
+  
+      console.log("Sorted Projects Data (Descending): ", sortedProjectsData);
+      setGroupedRatings(sortedProjectsData);
+    }, (error) => {
+      console.error("Error listening to ratings:", error);
     });
   
-    console.log("Processed Projects Data: ", projectsData);
-  
-    setGroupedRatings(projectsData);
+    // Return unsubscribe function to be used in cleanup
+    return unsubscribe;
   }
   
+  
   useEffect(() => {
-    fetchRatingsAndProjects();
+    // Set up the real-time listener
+    const unsubscribe = processRatingsAndProjects();
+
+    // Cleanup function
+    return () => {
+      // Unsubscribe from the listener when component unmounts
+      unsubscribe.then((unsub) => unsub());
+    };
   }, []);
   
   useEffect(() => {
@@ -130,12 +150,15 @@ function App() {
         Your browser does not support the video tag.
       </video>
 
-      <div className="w-full max-w-8xl backdrop-blur-lg bg-white/10 rounded-lg shadow-2xl relative">
+      <div className="w-full max-w-8xl backdrop-blur-lg bg-white/10 rounded-lg shadow-2xl relative flex flex-col">
         {/* Title */}
         <div className="bg-[#2B2B2B] p-6 rounded-t-lg flex items-center justify-center">
           <h1 className="text-6xl text-[#fff] flex items-center gap-3">
-            knowcode 2.0 Scoreboard
+            round 1 Scoreboard
           </h1>
+          <div className='text-right absolute right-10'>
+            <button onClick={sortTeamsDescending} className='text-white text-right'>sort</button>
+          </div>
         </div>
 
         {/* Table */}
